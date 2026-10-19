@@ -1,0 +1,9 @@
+# scratch captures and dumps
+*.png
+*.xml
+*.log
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store

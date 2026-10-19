@@ -1,0 +1,11 @@
+[
+  { "cmd": "start",  "args": ["dev.imranr.obtainium"] },
+  { "cmd": "wait",   "args": ["Apps", "--timeout", "20"] },
+  { "cmd": "tap",    "args": ["Settings"] },
+  { "cmd": "tap",    "args": ["Updates"] },
+  { "cmd": "scroll", "args": ["down", "--until", "Installation method", "--max", "8"] },
+  { "cmd": "tap",    "args": ["Installation method"] },
+  { "cmd": "tap",    "args": ["Root"] },
+  { "cmd": "key",    "args": ["BACK"] },
+  { "cmd": "key",    "args": ["BACK"] }
+]
