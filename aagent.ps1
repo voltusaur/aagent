@@ -71,7 +71,10 @@ function Invoke-DeviceCommand {
 }
 
 function Save-Screenshot {
-    param([string]$Path = $script:ShotPath)
+    param([string]$Path)
+    if (-not $Path) {
+        $Path = Join-Path $script:WorkDir ('shot-' + [guid]::NewGuid().ToString('N') + '.png')
+    }
     & $env:ComSpec /c "`"$($script:Adb)`" exec-out screencap -p > `"$Path`""
     if (-not (Test-Path $Path)) { throw 'screencap failed' }
     return $Path
@@ -125,20 +128,34 @@ function Find-Element {
     param(
         [string]$Pattern,
         $Lines,
-        [switch]$Regex
+        [switch]$Regex,
+        [switch]$Exact
     )
 
     if (-not $Lines) { $Lines = Get-ScreenLines }
 
-    $matches = @()
-    foreach ($l in $Lines) {
-        $hit = $false
-        if ($Regex) { $hit = [regex]::IsMatch($l.text, $Pattern, 'IgnoreCase') }
-        else { $hit = $l.text.IndexOf($Pattern, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }
-        if ($hit) { $matches += $l }
+    if ($Regex) {
+        foreach ($l in ($Lines | Sort-Object y, x)) {
+            if ([regex]::IsMatch($l.text, $Pattern, 'IgnoreCase')) { return $l }
+        }
+        return $null
     }
-    if ($matches.Count -eq 0) { return $null }
-    return ($matches | Sort-Object y, x | Select-Object -First 1)
+
+    if ($Exact) {
+        foreach ($l in ($Lines | Sort-Object y, x)) {
+            if ($l.text.Trim() -ieq $Pattern) { return $l }
+        }
+        return $null
+    }
+
+    # exact whole-line matches win over substring matches
+    foreach ($l in ($Lines | Sort-Object y, x)) {
+        if ($l.text.Trim() -ieq $Pattern) { return $l }
+    }
+    foreach ($l in ($Lines | Sort-Object y, x)) {
+        if ($l.text.IndexOf($Pattern, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $l }
+    }
+    return $null
 }
 
 # --------------------------------------------------------------------------
@@ -167,11 +184,11 @@ aagent <command> [args]
 }
 
 function Invoke-Verb {
-    param([string]$Name, [string[]]$Args)
+    param([string]$Name, [string[]]$ArgList)
 
     $json = $false
     $clean = @()
-    foreach ($a in $Args) {
+    foreach ($a in $ArgList) {
         if ($a -eq '--json') { $json = $true } else { $clean += $a }
     }
 
@@ -183,7 +200,8 @@ function Invoke-Verb {
         }
 
         'shot' {
-            $p = if ($clean.Count -ge 1) { $clean[0] } else { $script:ShotPath }
+            $p = $null
+            if ($clean.Count -ge 1) { $p = $clean[0] }
             $path = Save-Screenshot -Path $p
             return "screenshot: $path"
         }
@@ -201,7 +219,9 @@ function Invoke-Verb {
 
         'find' {
             if ($clean.Count -lt 1) { throw 'find requires text' }
-            $e = Find-Element -Pattern $clean[0]
+            $useRegex = $false
+            if ($clean -contains '--regex') { $useRegex = $true }
+            $e = Find-Element -Pattern $clean[0] -Regex:$useRegex
             if (-not $e) { throw "not found: $($clean[0])" }
             if ($json) { return ($e | Select-Object text, x, y | ConvertTo-Json) }
             return ('{0}  -> ({1},{2})' -f $e.text, $e.x, $e.y)
@@ -210,12 +230,14 @@ function Invoke-Verb {
         'tap' {
             if ($clean.Count -lt 1) { throw 'tap requires text' }
             $retries = 3
+            $useRegex = $false
             if ($clean -contains '--retries') {
                 $i = [array]::IndexOf($clean, '--retries')
                 $retries = [int]$clean[$i + 1]
             }
+            if ($clean -contains '--regex') { $useRegex = $true }
             for ($i = 0; $i -lt $retries; $i++) {
-                $e = Find-Element -Pattern $clean[0]
+                $e = Find-Element -Pattern $clean[0] -Regex:$useRegex
                 if ($e) {
                     Invoke-DeviceCommand 'shell' 'input' 'tap' $e.x $e.y | Out-Null
                     Start-Sleep -Milliseconds 700
@@ -318,12 +340,15 @@ function Invoke-Verb {
                 }
                 if ($result) { return (($result | ForEach-Object { '{0,-45} ({1},{2})' -f $_.text, $_.x, $_.y }) -join "`n") }
             }
-            return "uiautomator unavailable (Flutter/Compose); falling back to OCR:`n" + (Invoke-Verb -Name 'ocr' -Args @())
+            return "uiautomator unavailable (Flutter/Compose); falling back to OCR:`n" + (Invoke-Verb -Name 'ocr' -ArgList @())
         }
 
         'start' {
             if ($clean.Count -lt 1) { throw 'start requires a package' }
-            $out = Invoke-DeviceCommand 'shell' 'monkey' '-p' $clean[0] '-c' 'android.intent.category.LAUNCHER' '1'
+            $resolved = Invoke-DeviceCommand 'shell' 'cmd' 'package' 'resolve-activity' '--brief' '-c' 'android.intent.category.LAUNCHER' $clean[0]
+            $component = ($resolved | Where-Object { $_ -match '/' } | Select-Object -Last 1).Trim()
+            if (-not $component) { throw "no launcher activity for $($clean[0])" }
+            $out = Invoke-DeviceCommand 'shell' 'am' 'start' '-n' $component
             return ($out -join "`n")
         }
 
@@ -341,7 +366,7 @@ function Invoke-Verb {
                 $argList = @()
                 if ($s.args) { $argList = @($s.args | ForEach-Object { [string]$_ }) }
                 try {
-                    $r = Invoke-Verb -Name $s.cmd -Args $argList
+                    $r = Invoke-Verb -Name $s.cmd -ArgList $argList
                     $log += "[ok]   $($s.cmd) $($argList -join ' ') -> $r"
                 }
                 catch {
@@ -357,7 +382,7 @@ function Invoke-Verb {
 }
 
 try {
-    $result = Invoke-Verb -Name $Command -Args $Rest
+    $result = Invoke-Verb -Name $Command -ArgList $Rest
     if ($null -ne $result) { $result }
 }
 catch {
